@@ -13,7 +13,7 @@ const io = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] } 
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/health', (req, res) => res.json({ ok: true, lobbies: lobbies.size, queue: matchQueue.length }));
 
-const ROOM_WIDTH = 700;
+const ROOM_WIDTH = 800;
 const ROOM_HEIGHT = 500;
 const MONSTER_START_TIME = 180;
 const MONSTER_INTERVAL = 14;
@@ -46,7 +46,7 @@ function fullPlayerList(lobby) {
 }
 function generateWallsForRoom(offsetX) {
   const walls = [];
-  const count = 3 + Math.floor(Math.random() * 3);
+  const count = 4 + Math.floor(Math.random() * 5);
   let tries = 0;
   while (walls.length < count && tries < 100) {
     tries++;
