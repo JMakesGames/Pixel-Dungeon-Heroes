@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Pixel Dungeon: Online PvP</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+  :root{ --bg:#150f1e; --panel:#241a33; --wall:#3a2a4d; --amber:#f2a341; --amberdim:#a86f26; --ink:#e9e0f5; --inkdim:#a898c2; }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--ink);font-family:'Press Start 2P','Courier New',monospace;overflow:hidden;}
+  #wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;padding:10px;}
+  h1{font-size:16px;color:var(--amber);text-shadow:3px 3px 0 #000;margin:0 0 6px 0;}
+  #frame{position:relative;border:6px solid var(--wall);width:100%;max-width:900px;background:#000;
+    box-shadow:0 0 0 3px var(--bg),0 0 0 9px var(--amberdim);}
+  canvas{display:block;width:100%;height:auto;image-rendering:pixelated;background:#150f1e;}
+  .overlay{position:absolute;inset:0;background:rgba(10,7,16,.95);display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:10px;padding:16px;text-align:center;overflow-y:auto;}
+  .hidden{display:none !important;}
+  p,.small{font-size:10px;color:var(--inkdim);line-height:1.8;max-width:520px;}
+  input{font-family:inherit;font-size:10px;padding:8px;background:#241a33;color:var(--ink);border:2px solid var(--amberdim);text-align:center;width:220px;margin:4px;}
+  button{font-family:inherit;font-size:10px;background:var(--panel);color:var(--amber);border:3px solid var(--amberdim);
+    padding:10px 14px;cursor:pointer;box-shadow:3px 3px 0 #000;margin:4px;}
+  button:hover{background:#33244a;}
+  button.primary{background:var(--amber);color:#1a1225;border-color:#7a5019;}
+  button:disabled{opacity:.4;cursor:not-allowed;}
+  .row{display:flex;gap:16px;flex-wrap:wrap;justify-content:center;}
+  .panel{background:var(--panel);border:2px solid var(--amberdim);padding:12px;text-align:left;}
+  #playerList{list-style:none;padding:0;margin:8px 0;font-size:9px;color:var(--ink);text-align:left;min-width:220px;}
+  #playerList li{padding:4px 0;border-bottom:1px solid #3a2a4d;}
+  .err{color:#ff6b6b;font-size:9px;min-height:24px;max-width:400px;}
+  #connStatus{font-size:9px;padding:6px 10px;border:2px solid var(--amberdim);margin-bottom:4px;}
+  #connStatus.ok{color:#7fd97f;border-color:#7fd97f;}
+  #connStatus.bad{color:#ff6b6b;border-color:#ff6b6b;}
+  #connStatus.pending{color:#ffd54a;border-color:#ffd54a;}
+  #hud{position:absolute;top:8px;left:8px;right:8px;display:flex;justify-content:space-between;pointer-events:none;font-size:8px;}
+  #hud .box{background:rgba(10,7,16,.75);border:2px solid var(--amberdim);padding:5px 8px;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>⚔ PIXEL DUNGEON: ONLINE PVP ⚔</h1>
+  <div id="frame">
+    <canvas id="game" width="900" height="500"></canvas>
+    <div id="hud" class="hidden">
+      <div class="box">🕒 <span id="hudTime">0:00</span></div>
+      <div class="box">❤ <span id="hudHp">100</span> HP</div>
+    </div>
+
+    <div class="overlay" id="connectScreen">
+      <h2>JOIN OR CREATE A MATCH</h2>
+      <div id="connStatus" class="pending">Connecting to server...</div>
+      <p>Your friends need this same page open in their own browser (same URL as this tab).
+      Everyone types the exact same lobby name (and password, if you set one) to land in the
+      same match. Lobby names are not case-sensitive.</p>
+      <input id="nameInput" placeholder="Your name" maxlength="14">
+      <div class="panel" style="max-width:400px;">
+        <div class="small" style="color:var(--amber);margin-bottom:4px;">⚔ RANKED 1v1 QUICK MATCH</div>
+        <p class="small">Get paired automatically with the next available opponent. No lobby name needed.</p>
+        <button class="primary" id="quickMatchBtn" disabled>FIND MATCH</button>
+        <button id="cancelQueueBtn" class="hidden">CANCEL</button>
+        <div class="small" id="queueStatus"></div>
+      </div>
+      <div class="row">
+        <div class="panel">
+          <div class="small" style="color:var(--amber);margin-bottom:4px;">CREATE LOBBY</div>
+          <input id="createLobbyName" placeholder="Lobby name"><br>
+          <input id="createPassword" placeholder="Password (optional)"><br>
+          <input id="minPlayers" type="number" min="2" max="8" value="2" placeholder="Players to start"><br>
+          <button class="primary" id="createBtn" disabled>CREATE</button>
+        </div>
+        <div class="panel">
+          <div class="small" style="color:var(--amber);margin-bottom:4px;">JOIN LOBBY</div>
+          <input id="joinLobbyName" placeholder="Lobby name"><br>
+          <input id="joinPassword" placeholder="Password (if any)"><br>
+          <button class="primary" id="joinBtn" disabled>JOIN</button>
+        </div>
+      </div>
+      <div class="err" id="connectErr"></div>
+    </div>
+
+    <div class="overlay hidden" id="lobbyScreen">
+      <h2 id="lobbyTitle">LOBBY</h2>
+      <p class="small" id="lobbyStatus">Waiting for players...</p>
+      <p style="color:#ffd54a;font-size:9px;">⬇ The match will NOT start until every player below clicks READY UP ⬇</p>
+      <ul id="playerList"></ul>
+      <div class="row">
+        <button id="pickBow">🏹 BOW &amp; ARROW</button>
+        <button id="pickSword">🗡 SWORD</button>
+      </div>
+      <p class="small">Selected: <span id="pickedWeapon">Bow &amp; Arrow</span></p>
+      <button class="primary" id="readyBtn" style="font-size:13px;padding:14px 20px;">✓ READY UP</button>
+    </div>
+
+    <div class="overlay hidden" id="matchOverScreen">
+      <h2 id="matchOverTitle">MATCH OVER</h2>
+      <p class="small">Refresh this page to join another match.</p>
+      <button class="primary" id="reloadBtn">PLAY AGAIN</button>
+    </div>
+  </div>
+  <p class="small" style="margin-top:8px;">Move: WASD/Arrows | Aim: Mouse | Attack: Click | 100 HP each, both weapons deal 15 dmg</p>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+(function(){
+"use strict";
+const canvas=document.getElementById('game'), ctx=canvas.getContext('2d');
+ctx.imageSmoothingEnabled=false;
+const CW=canvas.width, CH=canvas.height;
+const COLORS=['#3f7a3f','#2f5c8a','#8a3a3a','#7a5aa0','#c9a227','#4a4a4a','#2f8fd6','#c94a8a'];
+
+// ---------- connection diagnostics ----------
+const connStatusEl=document.getElementById('connStatus');
+const connectErrEl=document.getElementById('connectErr');
+const createBtn=document.getElementById('createBtn');
+const joinBtn=document.getElementById('joinBtn');
+const quickMatchBtn=document.getElementById('quickMatchBtn');
+const cancelQueueBtn=document.getElementById('cancelQueueBtn');
+const queueStatusEl=document.getElementById('queueStatus');
+
+function showFatalConnError(msg){
+  connStatusEl.textContent=msg;
+  connStatusEl.className='bad';
+  createBtn.disabled=true; joinBtn.disabled=true; quickMatchBtn.disabled=true;
+}
+
+if(location.protocol === 'file:'){
+  showFatalConnError('This page was opened as a local file (file://...) instead of a live web address. '+
+    'Multiplayer cannot work this way - every player must open the SAME https:// URL from your deployed '+
+    'server in their own browser, not a copy of this HTML file sent directly to them.');
+  throw new Error('Opened via file:// - no server to connect to');
+}
+
+if(typeof io === 'undefined'){
+  showFatalConnError('Could not load the socket.io library from '+location.origin+'/socket.io/socket.io.js. '+
+    'This usually means the server is not actually running at this address, or this file is not being served '+
+    'by the Node server at all. Confirm the URL is your live deployed link (e.g. https://your-app.glitch.me), '+
+    'not a file opened locally, then check that the server process shows "running on port ..." in its logs.');
+  throw new Error('socket.io client library failed to load');
+}
+
+const socket = io({
+  reconnection: true,
+  reconnectionAttempts: Infinity,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 5000,
+  timeout: 20000,
+  transports: ['websocket', 'polling'],
+});
+
+let connectAttempts=0;
+let firstConnectDone=false;
+connStatusEl.textContent='Connecting to '+location.origin+' ...';
+
+socket.on('connect', ()=>{
+  firstConnectDone=true; connectAttempts=0;
+  connStatusEl.textContent='Connected to server ✓ ('+socket.io.engine.transport.name+')';
+  connStatusEl.className='ok';
+  createBtn.disabled=false; joinBtn.disabled=false; quickMatchBtn.disabled=false;
+  console.log('[socket] connected, id =', socket.id, 'transport =', socket.io.engine.transport.name);
+});
+socket.on('connect_error', (err)=>{
+  connectAttempts++;
+  connStatusEl.className='bad';
+  createBtn.disabled=true; joinBtn.disabled=true; quickMatchBtn.disabled=true;
+  if(!firstConnectDone){
+    connStatusEl.innerHTML='Still trying to reach the server (attempt '+connectAttempts+')... '+
+      'Free hosting tiers often "sleep" and can take up to a minute to wake up on the first visit - '+
+      'this page will keep retrying automatically. If this goes past 2 minutes, the server link itself '+
+      'is likely wrong or not deployed - double check the URL with whoever set it up.';
+  } else {
+    connStatusEl.textContent='Lost connection, retrying (attempt '+connectAttempts+')...';
+  }
+  console.error('[socket] connect_error', err.message);
+});
+socket.on('reconnect_attempt', (n)=>{ console.log('[socket] reconnect_attempt', n); });
+
+const healthLineEl=document.createElement('div');
+healthLineEl.className='small';
+healthLineEl.id='healthLine';
+healthLineEl.style.marginTop='2px';
+connStatusEl.insertAdjacentElement('afterend', healthLineEl);
+fetch('/health').then(r=>r.json()).then(data=>{
+  healthLineEl.style.color='#7fd97f';
+  healthLineEl.textContent='Server HTTP check OK - lobbies: '+data.lobbies+', queue: '+data.queue;
+}).catch(err=>{
+  healthLineEl.style.color='#ff6b6b';
+  healthLineEl.textContent='Server HTTP check FAILED ('+err.message+') - the server itself is not responding at this URL at all. '+
+    'This points to the deployment being down/asleep/wrong, not a bug in the game code.';
+});
+socket.on('disconnect', (reason)=>{
+  connStatusEl.textContent='Disconnected from server ('+reason+') - reconnecting automatically...';
+  connStatusEl.className='bad';
+  console.warn('[socket] disconnected:', reason);
+});
+
+let myId=null, myName='', myWeapon='ranged';
+let lobbyName=null;
+let arenaWidth=0, arenaHeight=500, walls=[];
+let players={};
+let monsters={};
+let matchTime=0;
+let myArrows=[];
+let fxArrows=[];
+let particles=[];
+let keys={}, mouse={x:CW/2,y:CH/2};
+let lastShot=-999, lastMelee=-999;
+let colorAssign={};
+let colorCounter=0;
+
+function dist(x1,y1,x2,y2){ return Math.hypot(x1-x2,y1-y2); }
+function circleRectCollide(cx,cy,r,rect){
+  const cxr=Math.max(rect.x,Math.min(cx,rect.x+rect.w)), cyr=Math.max(rect.y,Math.min(cy,rect.y+rect.h));
+  const dx=cx-cxr, dy=cy-cyr; return (dx*dx+dy*dy)<r*r;
+}
+function colorFor(id){
+  if(!(id in colorAssign)) colorAssign[id]=COLORS[colorCounter++ % COLORS.length];
+  return colorAssign[id];
+}
+
+const connectScreen=document.getElementById('connectScreen');
+const lobbyScreen=document.getElementById('lobbyScreen');
+const matchOverScreen=document.getElementById('matchOverScreen');
+const hud=document.getElementById('hud');
+
+createBtn.onclick=()=>{
+  connectErrEl.textContent='';
+  myName=document.getElementById('nameInput').value.trim()||'Player';
+  const lname=document.getElementById('createLobbyName').value.trim();
+  const pass=document.getElementById('createPassword').value;
+  const minP=parseInt(document.getElementById('minPlayers').value,10)||2;
+  if(!lname){ connectErrEl.textContent='Enter a lobby name.'; return; }
+  console.log('[emit] create_lobby', lname);
+  socket.emit('create_lobby',{lobbyName:lname,password:pass,playerName:myName,minPlayers:minP});
+};
+joinBtn.onclick=()=>{
+  connectErrEl.textContent='';
+  myName=document.getElementById('nameInput').value.trim()||'Player';
+  const lname=document.getElementById('joinLobbyName').value.trim();
+  const pass=document.getElementById('joinPassword').value;
+  if(!lname){ connectErrEl.textContent='Enter a lobby name.'; return; }
+  console.log('[emit] join_lobby', lname);
+  socket.emit('join_lobby',{lobbyName:lname,password:pass,playerName:myName});
+};
+quickMatchBtn.onclick=()=>{
+  connectErrEl.textContent='';
+  myName=document.getElementById('nameInput').value.trim()||'Player';
+  socket.emit('quick_match',{playerName:myName});
+  quickMatchBtn.classList.add('hidden');
+  cancelQueueBtn.classList.remove('hidden');
+  queueStatusEl.textContent='Searching for an opponent...';
+};
+cancelQueueBtn.onclick=()=>{
+  socket.emit('cancel_quick_match');
+  quickMatchBtn.classList.remove('hidden');
+  cancelQueueBtn.classList.add('hidden');
+  queueStatusEl.textContent='';
+};
+socket.on('queued', data=>{ queueStatusEl.textContent='In queue (position '+data.position+')...'; });
+socket.on('lobby_error', msg=>{ console.warn('[lobby_error]', msg); connectErrEl.textContent=msg; });
+socket.on('joined_lobby', data=>{
+  console.log('[joined_lobby]', data);
+  lobbyName=data.name;
+  connectScreen.classList.add('hidden');
+  lobbyScreen.classList.remove('hidden');
+  document.getElementById('lobbyTitle').textContent='LOBBY: '+data.name;
+});
+
+document.getElementById('pickBow').onclick=()=>{ myWeapon='ranged'; socket.emit('set_weapon','ranged'); document.getElementById('pickedWeapon').textContent='Bow & Arrow'; };
+document.getElementById('pickSword').onclick=()=>{ myWeapon='melee'; socket.emit('set_weapon','melee'); document.getElementById('pickedWeapon').textContent='Sword'; };
+document.getElementById('readyBtn').onclick=(e)=>{
+  const btn=e.target; const isReady = btn.textContent==='READY UP';
+  socket.emit('set_ready', isReady);
+  btn.textContent = isReady ? 'CANCEL READY' : 'READY UP';
+};
+document.getElementById('reloadBtn').onclick=()=>location.reload();
+
+socket.on('lobby_update', data=>{
+  const list=document.getElementById('playerList'); list.innerHTML='';
+  data.players.forEach(p=>{
+    const li=document.createElement('li');
+    li.style.color = p.ready ? '#7fd97f' : '#ff9d6b';
+    li.textContent = (p.ready?'✓ ':'… ') + p.name + (p.ready?' - READY':' - NOT READY YET') + (p.id===myId?' (you)':'');
+    list.appendChild(li);
+  });
+  const allReady = data.players.length>0 && data.players.every(p=>p.ready);
+  const enoughPlayers = data.players.length >= data.minPlayers;
+  let msg = `${data.players.length} / ${data.minPlayers} players joined. `;
+  if(!enoughPlayers) msg += 'Waiting for more players to join this exact lobby name.';
+  else if(!allReady) msg += 'Waiting for everyone to click READY UP.';
+  else msg += 'Starting match now...';
+  document.getElementById('lobbyStatus').textContent = msg;
+});
+
+socket.io.engine && socket.io.engine.on && socket.io.engine.on('connect', ()=>{ myId=socket.id; });
+socket.on('connect', ()=>{ myId=socket.id; });
+
+socket.on('match_start', data=>{
+  arenaWidth=data.arenaWidth; arenaHeight=data.arenaHeight; walls=data.walls;
+  players={};
+  data.players.forEach(p=>{ players[p.id]={...p, colorIdx:colorFor(p.id)}; });
+  myArrows=[]; fxArrows=[]; particles=[]; monsters={};
+  lobbyScreen.classList.add('hidden');
+  matchOverScreen.classList.add('hidden');
+  hud.classList.remove('hidden');
+});
+
+socket.on('tick', data=>{
+  matchTime=data.time;
+  data.players.forEach(p=>{
+    const existing=players[p.id];
+    players[p.id] = { ...p, colorIdx: existing?existing.colorIdx:colorFor(p.id) };
+  });
+  monsters={};
+  data.monsters.forEach(m=>{ monsters[m.id]=m; });
+  if(players[myId]) document.getElementById('hudHp').textContent=Math.max(0,Math.round(players[myId].hp));
+  const mm=Math.floor(matchTime/60), ss=Math.floor(matchTime%60);
+  document.getElementById('hudTime').textContent=mm+':'+(ss<10?'0':'')+ss;
+});
+
+socket.on('player_shoot', data=>{
+  fxArrows.push({x:data.x,y:data.y,vx:data.vx,vy:data.vy,angle:Math.atan2(data.vy,data.vx),traveled:0});
+});
+socket.on('player_died', data=>{
+  if(players[data.id]) players[data.id].alive=false;
+});
+socket.on('match_over', data=>{
+  hud.classList.add('hidden');
+  document.getElementById('matchOverTitle').textContent = data.winner ? (data.winner.id===myId ? 'YOU WIN!' : data.winner.name+' WINS!') : 'NO SURVIVORS';
+  matchOverScreen.classList.remove('hidden');
+});
+
+window.addEventListener('keydown', e=>{ keys[e.key.toLowerCase()]=true; });
+window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()]=false; });
+function canvasRelative(cx,cy){ const r=canvas.getBoundingClientRect(); return {x:(cx-r.left)*(CW/r.width), y:(cy-r.top)*(CH/r.height)}; }
+canvas.addEventListener('mousemove', e=>{ const p=canvasRelative(e.clientX,e.clientY); mouse.x=p.x; mouse.y=p.y; });
+canvas.addEventListener('mousedown', ()=>{
+  const me=players[myId];
+  if(!me || !me.alive) return;
+  if(myWeapon==='melee') doMelee(); else doShoot();
+});
+
+function worldMouse(){ return { x: mouse.x + camX(), y: mouse.y }; }
+function camX(){
+  const me=players[myId];
+  const cx = me ? me.x - CW/2 : 0;
+  return Math.max(0, Math.min(Math.max(0,arenaWidth-CW), cx));
+}
+
+function doShoot(){
+  const now=performance.now()/1000; if(now-lastShot<0.35) return; lastShot=now;
+  const me=players[myId]; const wm=worldMouse();
+  const dx=wm.x-me.x, dy=wm.y-me.y, len=Math.hypot(dx,dy)||1, speed=480;
+  const vx=dx/len*speed, vy=dy/len*speed;
+  myArrows.push({x:me.x,y:me.y,vx,vy,angle:Math.atan2(dy,dx),traveled:0});
+  socket.emit('player_shoot',{x:me.x,y:me.y,vx,vy});
+}
+function doMelee(){
+  const now=performance.now()/1000; if(now-lastMelee<0.5) return; lastMelee=now;
+  const me=players[myId];
+  Object.values(players).forEach(p=>{
+    if(p.id===myId || !p.alive) return;
+    if(dist(me.x,me.y,p.x,p.y)<90) socket.emit('report_hit',{targetId:p.id, dmg:15});
+  });
+}
+
+let lastTime=null;
+function loop(ts){
+  if(!lastTime) lastTime=ts;
+  const dt=Math.min(0.05,(ts-lastTime)/1000); lastTime=ts;
+  try{ update(dt); draw(); }catch(err){ console.error(err); }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+function update(dt){
+  const me=players[myId];
+  if(me && me.alive){
+    let dx=0,dy=0;
+    if(keys['w']||keys['arrowup']) dy-=1;
+    if(keys['s']||keys['arrowdown']) dy+=1;
+    if(keys['a']||keys['arrowleft']) dx-=1;
+    if(keys['d']||keys['arrowright']) dx+=1;
+    if(dx||dy){
+      const len=Math.hypot(dx,dy), mx=dx/len, my=dy/len, speed=166;
+      const nx=me.x+mx*speed*dt;
+      if(!walls.some(w=>circleRectCollide(nx,me.y,13,w))) me.x=nx;
+      const ny=me.y+my*speed*dt;
+      if(!walls.some(w=>circleRectCollide(me.x,ny,13,w))) me.y=ny;
+      me.x=Math.max(20,Math.min(arenaWidth-20,me.x));
+      me.y=Math.max(20,Math.min(arenaHeight-20,me.y));
+    }
+    const wm=worldMouse();
+    me.facing=Math.atan2(wm.y-me.y, wm.x-me.x);
+    socket.emit('player_move',{x:me.x,y:me.y,facing:me.facing});
+  }
+
+  for(let i=myArrows.length-1;i>=0;i--){
+    const a=myArrows[i];
+    a.x+=a.vx*dt; a.y+=a.vy*dt; a.traveled+=Math.hypot(a.vx*dt,a.vy*dt);
+    if(a.traveled>460 || a.x<0||a.x>arenaWidth||a.y<0||a.y>arenaHeight){ myArrows.splice(i,1); continue; }
+    if(walls.some(w=>circleRectCollide(a.x,a.y,3,w))){ myArrows.splice(i,1); continue; }
+    let hit=false;
+    Object.values(players).forEach(p=>{
+      if(hit || p.id===myId || !p.alive) return;
+      if(dist(a.x,a.y,p.x,p.y)<16){ socket.emit('report_hit',{targetId:p.id,dmg:15}); hit=true; }
+    });
+    if(hit) myArrows.splice(i,1);
+  }
+  for(let i=fxArrows.length-1;i>=0;i--){
+    const a=fxArrows[i];
+    a.x+=a.vx*dt; a.y+=a.vy*dt; a.traveled+=Math.hypot(a.vx*dt,a.vy*dt);
+    if(a.traveled>460) fxArrows.splice(i,1);
+  }
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i]; p.x+=p.vx*dt; p.y+=p.vy*dt; p.life-=dt;
+    if(p.life<=0) particles.splice(i,1);
+  }
+}
+
+function drawArenaBg(offsetX){
+  const tile=40;
+  ctx.save(); ctx.translate(-offsetX,0);
+  const startX=Math.floor(offsetX/tile)*tile;
+  for(let x=startX-tile;x<startX+CW+tile;x+=tile){
+    for(let y=0;y<arenaHeight;y+=tile){
+      ctx.fillStyle=((x/tile)+(y/tile))%2===0?'#2c2140':'#251b38';
+      ctx.fillRect(x,y,tile,tile);
+    }
+  }
+  ctx.strokeStyle='#3a2a4d'; ctx.lineWidth=8; ctx.strokeRect(0,0,arenaWidth,arenaHeight);
+  walls.forEach(w=>{
+    ctx.fillStyle='#4a3f5c'; ctx.fillRect(w.x,w.y,w.w,w.h);
+    ctx.strokeStyle='#1f1830'; ctx.lineWidth=2; ctx.strokeRect(w.x,w.y,w.w,w.h);
+  });
+  ctx.restore();
+}
+function drawHuman(x,y,facing,color,weaponKind,offsetX){
+  ctx.save(); ctx.translate(x-offsetX,y);
+  ctx.fillStyle='rgba(0,0,0,.35)'; ctx.beginPath(); ctx.ellipse(0,16,12,5,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#5b3a24'; ctx.fillRect(-8,4,6,12); ctx.fillRect(2,4,6,12);
+  ctx.fillStyle=color; ctx.fillRect(-9,-10,18,16);
+  ctx.fillStyle='#e8b98a'; ctx.fillRect(-7,-22,14,12);
+  ctx.fillStyle='#5a3620'; ctx.fillRect(-7,-24,14,5);
+  ctx.fillStyle='#1a1225'; ctx.fillRect(-4,-17,2,2); ctx.fillRect(2,-17,2,2);
+  ctx.restore();
+  ctx.save(); ctx.translate(x-offsetX,y-2); ctx.rotate(facing);
+  if(weaponKind==='ranged'){
+    ctx.strokeStyle='#8a5a2a'; ctx.lineWidth=3; ctx.beginPath(); ctx.arc(6,0,14,-1,1); ctx.stroke();
+  } else {
+    ctx.fillStyle='#c9c9d4'; ctx.fillRect(4,-2,22,4);
+    ctx.fillStyle='#8a5a2a'; ctx.fillRect(-4,-3,8,6);
+  }
+  ctx.restore();
+}
+function drawArrow(a,offsetX){
+  ctx.save(); ctx.translate(a.x-offsetX,a.y); ctx.rotate(a.angle);
+  ctx.strokeStyle='#c9a876'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(-10,0); ctx.lineTo(6,0); ctx.stroke();
+  ctx.fillStyle='#d8d8d8'; ctx.beginPath(); ctx.moveTo(10,0); ctx.lineTo(4,-3); ctx.lineTo(4,3); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+function drawMonster(m,offsetX){
+  ctx.save(); ctx.translate(m.x-offsetX,m.y);
+  ctx.fillStyle='#5fd66b'; ctx.beginPath(); ctx.ellipse(0,0,13,9,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#1f6b2c';
+  ctx.beginPath(); ctx.arc(-4,-2,1.6,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(4,-2,1.6,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+function drawHpBar(x,y,hp,offsetX){
+  const w=30;
+  ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(x-offsetX-w/2,y-34,w,4);
+  ctx.fillStyle='#7fd97f'; ctx.fillRect(x-offsetX-w/2,y-34,w*Math.max(0,hp/100),4);
+}
+function drawNameTag(x,y,name,offsetX){
+  ctx.fillStyle='rgba(255,255,255,.8)'; ctx.font='7px monospace'; ctx.textAlign='center';
+  ctx.fillText(name,x-offsetX,y-38);
+}
+
+function renderSceneFromCamera(offsetX){
+  drawArenaBg(offsetX);
+  Object.values(monsters).forEach(m=>drawMonster(m,offsetX));
+  fxArrows.forEach(a=>drawArrow(a,offsetX));
+  myArrows.forEach(a=>drawArrow(a,offsetX));
+  Object.values(players).forEach(p=>{
+    if(!p.alive) return;
+    drawHuman(p.x,p.y,p.facing,p.colorIdx||'#3f7a3f',p.weapon,offsetX);
+    drawHpBar(p.x,p.y,p.hp,offsetX);
+    drawNameTag(p.x,p.y,p.name+(p.id===myId?' (you)':''),offsetX);
+  });
+}
+
+function draw(){
+  ctx.clearRect(0,0,CW,CH);
+  if(!arenaWidth) return;
+  const me=players[myId];
+  if(me && me.alive){
+    renderSceneFromCamera(camX());
+  } else {
+    const alive=Object.values(players).filter(p=>p.alive);
+    if(alive.length===0){
+      ctx.fillStyle='#e9e0f5'; ctx.font='12px monospace'; ctx.textAlign='center';
+      ctx.fillText('Waiting for match result...', CW/2, CH/2);
+      return;
+    }
+    const cols=Math.ceil(Math.sqrt(alive.length));
+    const rows=Math.ceil(alive.length/cols);
+    const pw=CW/cols, ph=CH/rows;
+    alive.forEach((p,i)=>{
+      const col=i%cols, row=Math.floor(i/cols);
+      const px=col*pw, py=row*ph;
+      ctx.save();
+      ctx.beginPath(); ctx.rect(px,py,pw,ph); ctx.clip();
+      ctx.translate(px,py);
+      const camx=Math.max(0,Math.min(Math.max(0,arenaWidth-pw), p.x-pw/2));
+      const scale=pw/CW;
+      ctx.scale(scale, ph/CH);
+      renderSceneFromCamera(camx);
+      ctx.restore();
+      ctx.strokeStyle='#f2a341'; ctx.lineWidth=2; ctx.strokeRect(px+1,py+1,pw-2,ph-2);
+      ctx.fillStyle='#f2a341'; ctx.font='9px monospace'; ctx.textAlign='left';
+      ctx.fillText(p.name+' - SPECTATING', px+6, py+14);
+    });
+  }
+}
+})();
+</script>
+</body>
+</html>
