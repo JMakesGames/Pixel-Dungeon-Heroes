@@ -11,15 +11,34 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] } });
 
 app.use(express.static(path.join(__dirname, 'public')));
-app.get('/health', (req, res) => res.json({ ok: true, lobbies: lobbies.size, queue: matchQueue.length }));
+const SERVER_VERSION = 'v7-ranked-points-and-sidebar';
+app.get('/health', (req, res) => res.json({ ok: true, version: SERVER_VERSION, lobbies: lobbies.size, queue: matchQueue.length }));
 
 const ROOM_WIDTH = 800;
 const ROOM_HEIGHT = 500;
 const MONSTER_START_TIME = 180;
 const MONSTER_INTERVAL = 14;
 
+const RANK_TIERS = [
+  { name: 'Noob Warrior',          min: 0,    max: 99 },
+  { name: 'Still A Noob Warrior',  min: 100,  max: 199 },
+  { name: 'Warrior',               min: 200,  max: 299 },
+  { name: 'Advanced Warrior',      min: 300,  max: 399 },
+  { name: 'Pro-Warrior',           min: 400,  max: 499 },
+  { name: 'Legendary Warrior',     min: 500,  max: 999 },
+  { name: 'God Warrior',           min: 1000, max: 4999 },
+  { name: 'The G.O.A.T. Warrior',  min: 5000, max: 10000 },
+];
+function getRankName(points) {
+  points = Math.max(0, Math.floor(points) || 0);
+  for (const tier of RANK_TIERS) { if (points >= tier.min && points <= tier.max) return tier.name; }
+  return RANK_TIERS[RANK_TIERS.length - 1].name;
+}
+function randomWinPoints() { return 7 + Math.floor(Math.random() * 4); }   // 7-10
+function randomLosePoints() { return -(3 + Math.floor(Math.random() * 5)); } // -3 to -7
+
 const lobbies = new Map();      // key -> lobby
-const matchQueue = [];          // [{ socket, name }] waiting for ranked 1v1
+const matchQueue = [];          // [{ socket, name, points, rank }] waiting for ranked 1v1
 
 function normKey(name) { return (name || '').trim().toLowerCase().slice(0, 20); }
 
@@ -59,15 +78,42 @@ function generateWallsForRoom(offsetX) {
   }
   return walls;
 }
+function generateApples(walls) {
+  const apples = [];
+  let tries = 0;
+  const rectHit = (x, y, r, rect) => {
+    const cx = Math.max(rect.x, Math.min(x, rect.x + rect.w));
+    const cy = Math.max(rect.y, Math.min(y, rect.y + rect.h));
+    const dx = x - cx, dy = y - cy;
+    return (dx * dx + dy * dy) < r * r;
+  };
+  while (apples.length < 6 && tries < 200) {
+    tries++;
+    const x = 40 + Math.random() * (ROOM_WIDTH - 80);
+    const y = 40 + Math.random() * (ROOM_HEIGHT - 80);
+    if (walls.some(w => rectHit(x, y, 24, w))) continue;
+    if (apples.some(a => Math.hypot(a.x - x, a.y - y) < 60)) continue;
+    apples.push({ id: 'apple' + apples.length, x, y, taken: false });
+  }
+  return apples;
+}
+
 function buildArena(lobby) {
   const ids = Array.from(lobby.players.keys());
   const n = ids.length;
-  lobby.arenaWidth = ROOM_WIDTH * n;
-  lobby.walls = [];
-  for (let i = 0; i < n; i++) lobby.walls.push(...generateWallsForRoom(i * ROOM_WIDTH));
+  // One shared room, always the same size as a single-player dungeon room -
+  // no more stitching a separate room per player side by side.
+  lobby.arenaWidth = ROOM_WIDTH;
+  lobby.walls = generateWallsForRoom(0);
+  lobby.apples = generateApples(lobby.walls);
+  const margin = 110;
+  const usableWidth = ROOM_WIDTH - margin * 2;
   ids.forEach((id, i) => {
     const p = lobby.players.get(id);
-    p.x = i * ROOM_WIDTH + ROOM_WIDTH / 2; p.y = ROOM_HEIGHT / 2; p.hp = 100; p.alive = true;
+    const t = n > 1 ? i / (n - 1) : 0.5;
+    p.x = margin + usableWidth * t;
+    p.y = ROOM_HEIGHT / 2 + (i % 2 === 0 ? -40 : 40);
+    p.hp = 100; p.alive = true;
   });
 }
 
@@ -103,7 +149,8 @@ function startMatch(lobby) {
   lobby.monsterTimer = MONSTER_INTERVAL;
   lobby.monsters = new Map();
   io.to(lobby.key).emit('match_start', {
-    arenaWidth: lobby.arenaWidth, arenaHeight: lobby.arenaHeight, walls: lobby.walls, players: fullPlayerList(lobby),
+    arenaWidth: lobby.arenaWidth, arenaHeight: lobby.arenaHeight, walls: lobby.walls,
+    apples: lobby.apples, players: fullPlayerList(lobby),
   });
   console.log('[match_start]', lobby.key, 'players:', lobby.players.size);
   lobby.tickHandle = setInterval(() => tick(lobby), 100);
@@ -122,8 +169,21 @@ function checkMatchEnd(lobby) {
   if (alive.length <= 1) {
     lobby.state = 'ended';
     if (lobby.tickHandle) clearInterval(lobby.tickHandle);
-    io.to(lobby.key).emit('match_over', { winner: alive[0] ? { id: alive[0].id, name: alive[0].name } : null });
-    console.log('[match_over]', lobby.key);
+    const winner = alive[0] ? { id: alive[0].id, name: alive[0].name } : null;
+    if (lobby.ranked && winner) {
+      const winnerDelta = randomWinPoints();
+      const loserDelta = randomLosePoints();
+      lobby.players.forEach(p => {
+        const won = p.id === winner.id;
+        io.to(p.id).emit('match_over', {
+          winner, won, pointsDelta: won ? winnerDelta : loserDelta,
+        });
+      });
+      console.log('[match_over]', lobby.key, `points: winner +${winnerDelta}, loser ${loserDelta}`);
+    } else {
+      io.to(lobby.key).emit('match_over', { winner, won: null, pointsDelta: 0 });
+      console.log('[match_over]', lobby.key, '(unranked, no points)');
+    }
     // clean up non-persistent ranked lobbies once the match ends
     setTimeout(() => { if (lobby.players.size === 0) lobbies.delete(lobby.key); }, 30000);
   }
@@ -173,19 +233,35 @@ function removeFromQueue(socketId) {
 }
 
 function tryMatchQueue() {
-  while (matchQueue.length >= 2) {
-    const a = matchQueue.shift();
-    const b = matchQueue.shift();
-    if (a.socket.disconnected) { matchQueue.unshift(b); continue; }
-    if (b.socket.disconnected) { matchQueue.unshift(a); continue; }
-    const key = 'quick_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
-    const lobby = makeLobby(key, 'Ranked 1v1', '', 2, true);
-    lobbies.set(key, lobby);
-    addPlayerToLobby(a.socket, lobby, a.name);
-    addPlayerToLobby(b.socket, lobby, b.name);
-    lobby.players.forEach(p => { p.ready = true; });
-    broadcastLobby(lobby);
-    startMatch(lobby);
+  // Group waiting players by rank tier - a match can only be made between
+  // two players in the exact same tier, per the ranking rules.
+  const byRank = new Map();
+  matchQueue.forEach(entry => {
+    if (entry.socket.disconnected) return;
+    if (!byRank.has(entry.rank)) byRank.set(entry.rank, []);
+    byRank.get(entry.rank).push(entry);
+  });
+
+  byRank.forEach((entries, rank) => {
+    while (entries.length >= 2) {
+      const a = entries.shift();
+      const b = entries.shift();
+      removeFromQueue(a.socket.id);
+      removeFromQueue(b.socket.id);
+      const key = 'quick_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
+      const lobby = makeLobby(key, 'Ranked 1v1 - ' + rank, '', 2, true);
+      lobbies.set(key, lobby);
+      addPlayerToLobby(a.socket, lobby, a.name);
+      addPlayerToLobby(b.socket, lobby, b.name);
+      lobby.players.forEach(p => { p.ready = true; });
+      broadcastLobby(lobby);
+      startMatch(lobby);
+    }
+  });
+
+  // clean out any disconnected entries that never got matched
+  for (let i = matchQueue.length - 1; i >= 0; i--) {
+    if (matchQueue[i].socket.disconnected) matchQueue.splice(i, 1);
   }
 }
 
@@ -212,11 +288,14 @@ io.on('connection', (socket) => {
     addPlayerToLobby(socket, lobby, playerName);
   });
 
-  socket.on('quick_match', ({ playerName }) => {
+  socket.on('quick_match', ({ playerName, points }) => {
     removeFromQueue(socket.id);
-    matchQueue.push({ socket, name: (playerName || 'Player').trim().slice(0, 14) || 'Player' });
-    socket.emit('queued', { position: matchQueue.length });
-    console.log('[quick_match] queued', socket.id, 'queue size:', matchQueue.length);
+    const safePoints = Math.max(0, Math.floor(Number(points)) || 0);
+    const rank = getRankName(safePoints);
+    matchQueue.push({ socket, name: (playerName || 'Player').trim().slice(0, 14) || 'Player', points: safePoints, rank });
+    const sameRankWaiting = matchQueue.filter(q => q.rank === rank).length;
+    socket.emit('queued', { position: sameRankWaiting, rank });
+    console.log('[quick_match] queued', socket.id, 'rank:', rank, 'queue size:', matchQueue.length);
     tryMatchQueue();
   });
 
@@ -263,6 +342,18 @@ io.on('connection', (socket) => {
     if (target.hp <= 0) killPlayer(lobby, target);
   });
 
+  socket.on('eat_apple', ({ appleId }) => {
+    const lobby = lobbies.get(socket.data.lobbyKey);
+    if (!lobby || !lobby.apples) return;
+    const apple = lobby.apples.find(a => a.id === appleId);
+    const p = lobby.players.get(socket.id);
+    if (!apple || apple.taken || !p || !p.alive) return;
+    if (p.hp >= 100) return; // can't eat an apple while already at full health
+    apple.taken = true;
+    p.hp = Math.min(100, p.hp + 15);
+    io.to(lobby.key).emit('apple_taken', { appleId });
+  });
+
   socket.on('disconnect', (reason) => {
     console.log('[disconnect]', socket.id, reason);
     removeFromQueue(socket.id);
@@ -280,4 +371,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log('Pixel Dungeon Heroes PvP server running on port ' + PORT));
+server.listen(PORT, () => console.log('Pixel Dungeon Heroes PvP server ['+SERVER_VERSION+'] running on port ' + PORT));
