@@ -10,8 +10,15 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] } });
 
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
 app.use(express.static(path.join(__dirname, 'public')));
-const SERVER_VERSION = 'v7-ranked-points-and-sidebar';
+const SERVER_VERSION = 'v10-teams-redesign-and-wall-fix';
 app.get('/health', (req, res) => res.json({ ok: true, version: SERVER_VERSION, lobbies: lobbies.size, queue: matchQueue.length }));
 
 const ROOM_WIDTH = 800;
@@ -47,6 +54,9 @@ function makeLobby(key, displayName, password, minPlayers, ranked) {
     key, displayName, password: password || '',
     minPlayers: Math.max(2, Math.min(8, minPlayers || 2)),
     ranked: !!ranked,
+    teamsEnabled: false,
+    teamsQuestionAsked: false,
+    hostId: null,
     players: new Map(),
     state: 'waiting',
     arenaWidth: 0, arenaHeight: ROOM_HEIGHT, walls: [],
@@ -56,11 +66,11 @@ function makeLobby(key, displayName, password, minPlayers, ranked) {
 }
 
 function publicPlayerList(lobby) {
-  return Array.from(lobby.players.values()).map(p => ({ id: p.id, name: p.name, ready: p.ready, weapon: p.weapon }));
+  return Array.from(lobby.players.values()).map(p => ({ id: p.id, name: p.name, ready: p.ready, weapon: p.weapon, team: p.team || null }));
 }
 function fullPlayerList(lobby) {
   return Array.from(lobby.players.values()).map(p => ({
-    id: p.id, name: p.name, x: p.x, y: p.y, facing: p.facing, hp: p.hp, alive: p.alive, weapon: p.weapon,
+    id: p.id, name: p.name, x: p.x, y: p.y, facing: p.facing, hp: p.hp, alive: p.alive, weapon: p.weapon, team: p.team || null,
   }));
 }
 function generateWallsForRoom(offsetX) {
@@ -120,25 +130,56 @@ function buildArena(lobby) {
 function broadcastLobby(lobby) {
   io.to(lobby.key).emit('lobby_update', {
     name: lobby.displayName, minPlayers: lobby.minPlayers, players: publicPlayerList(lobby),
+    teamsEnabled: lobby.teamsEnabled,
   });
 }
 
-function addPlayerToLobby(socket, lobby, playerName) {
+function nameTakenInLobby(lobby, name) {
+  const norm = (name || '').trim().toLowerCase();
+  return Array.from(lobby.players.values()).some(p => p.name.toLowerCase() === norm);
+}
+
+function addPlayerToLobby(socket, lobby, playerName, opts) {
+  opts = opts || {};
+  let finalName = (playerName || 'Player').trim().slice(0, 14) || 'Player';
+  if (nameTakenInLobby(lobby, finalName)) {
+    if (opts.autoUniquify) {
+      let suffix = 2;
+      while (nameTakenInLobby(lobby, (finalName + ' ' + suffix).slice(0, 14))) suffix++;
+      finalName = (finalName + ' ' + suffix).slice(0, 14);
+    } else {
+      socket.emit('lobby_error', 'That name is already taken in this lobby - pick a different name.');
+      return false;
+    }
+  }
   socket.data.lobbyKey = lobby.key;
   socket.join(lobby.key);
+  if (!lobby.hostId) lobby.hostId = socket.id;
   lobby.players.set(socket.id, {
-    id: socket.id, name: (playerName || 'Player').trim().slice(0, 14) || 'Player',
-    weapon: 'ranged', ready: false, x: 0, y: 0, facing: 0, hp: 100, alive: true,
+    id: socket.id, name: finalName,
+    weapon: 'ranged', ready: false, x: 0, y: 0, facing: 0, hp: 100, alive: true, team: null,
   });
   broadcastLobby(lobby);
   socket.emit('joined_lobby', { name: lobby.displayName, minPlayers: lobby.minPlayers, ranked: lobby.ranked });
   console.log('[joined]', socket.id, '->', lobby.key, 'players now:', lobby.players.size);
+
+  if (!lobby.ranked && !lobby.teamsQuestionAsked && lobby.players.size >= 3 && lobby.state === 'waiting') {
+    lobby.teamsQuestionAsked = true;
+    io.to(lobby.hostId).emit('prompt_teams_question');
+    console.log('[teams] asking host', lobby.hostId, 'in', lobby.key);
+  }
+  return true;
 }
 
 function maybeStart(lobby) {
   if (lobby.state !== 'waiting') return;
   if (lobby.players.size < lobby.minPlayers) return;
   if (!Array.from(lobby.players.values()).every(p => p.ready)) return;
+  if (lobby.teamsEnabled) {
+    const players = Array.from(lobby.players.values());
+    if (!players.every(p => p.team === 'red' || p.team === 'blue')) return;
+    if (!players.some(p => p.team === 'red') || !players.some(p => p.team === 'blue')) return;
+  }
   startMatch(lobby);
 }
 
@@ -165,28 +206,51 @@ function killPlayer(lobby, p) {
 
 function checkMatchEnd(lobby) {
   if (lobby.state !== 'playing') return;
-  const alive = Array.from(lobby.players.values()).filter(p => p.alive);
-  if (alive.length <= 1) {
-    lobby.state = 'ended';
-    if (lobby.tickHandle) clearInterval(lobby.tickHandle);
-    const winner = alive[0] ? { id: alive[0].id, name: alive[0].name } : null;
-    if (lobby.ranked && winner) {
-      const winnerDelta = randomWinPoints();
-      const loserDelta = randomLosePoints();
-      lobby.players.forEach(p => {
-        const won = p.id === winner.id;
-        io.to(p.id).emit('match_over', {
-          winner, won, pointsDelta: won ? winnerDelta : loserDelta,
-        });
-      });
-      console.log('[match_over]', lobby.key, `points: winner +${winnerDelta}, loser ${loserDelta}`);
-    } else {
-      io.to(lobby.key).emit('match_over', { winner, won: null, pointsDelta: 0 });
-      console.log('[match_over]', lobby.key, '(unranked, no points)');
+  const alivePlayers = Array.from(lobby.players.values()).filter(p => p.alive);
+
+  let matchOver = false;
+  let winningTeam = null;
+  let winningPlayer = null;
+
+  if (lobby.teamsEnabled) {
+    const aliveTeams = new Set(alivePlayers.map(p => p.team));
+    if (aliveTeams.size <= 1) {
+      matchOver = true;
+      winningTeam = alivePlayers.length ? alivePlayers[0].team : null;
     }
-    // clean up non-persistent ranked lobbies once the match ends
-    setTimeout(() => { if (lobby.players.size === 0) lobbies.delete(lobby.key); }, 30000);
+  } else if (alivePlayers.length <= 1) {
+    matchOver = true;
+    winningPlayer = alivePlayers[0] || null;
   }
+
+  if (!matchOver) return;
+
+  lobby.state = 'ended';
+  if (lobby.tickHandle) clearInterval(lobby.tickHandle);
+
+  let winnerDelta = 0, loserDelta = 0;
+  const awardPoints = lobby.ranked && winningPlayer;
+  if (awardPoints) { winnerDelta = randomWinPoints(); loserDelta = randomLosePoints(); }
+
+  // Always compute and send each player their OWN accurate result directly -
+  // never a single shared broadcast, which is what previously made every
+  // player see "YOU LOSE" at once in non-ranked matches.
+  lobby.players.forEach(p => {
+    let won;
+    if (winningTeam) won = p.team === winningTeam;
+    else if (winningPlayer) won = p.id === winningPlayer.id;
+    else won = false; // no survivors at all
+    const winnerInfo = winningTeam
+      ? { id: null, name: winningTeam.toUpperCase() + ' TEAM' }
+      : (winningPlayer ? { id: winningPlayer.id, name: winningPlayer.name } : null);
+    io.to(p.id).emit('match_over', {
+      winner: winnerInfo, won,
+      pointsDelta: awardPoints ? (won ? winnerDelta : loserDelta) : 0,
+    });
+  });
+  console.log('[match_over]', lobby.key, winningTeam ? `team ${winningTeam} wins` : (winningPlayer ? `${winningPlayer.name} wins` : 'no survivors'));
+  // clean up non-persistent ranked lobbies once the match ends
+  setTimeout(() => { if (lobby.players.size === 0) lobbies.delete(lobby.key); }, 30000);
 }
 
 function tick(lobby) {
@@ -251,8 +315,8 @@ function tryMatchQueue() {
       const key = 'quick_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
       const lobby = makeLobby(key, 'Ranked 1v1 - ' + rank, '', 2, true);
       lobbies.set(key, lobby);
-      addPlayerToLobby(a.socket, lobby, a.name);
-      addPlayerToLobby(b.socket, lobby, b.name);
+      addPlayerToLobby(a.socket, lobby, a.name, {autoUniquify:true});
+      addPlayerToLobby(b.socket, lobby, b.name, {autoUniquify:true});
       lobby.players.forEach(p => { p.ready = true; });
       broadcastLobby(lobby);
       startMatch(lobby);
@@ -267,6 +331,7 @@ function tryMatchQueue() {
 
 io.on('connection', (socket) => {
   console.log('[connect]', socket.id);
+  socket.emit('server_info', { version: SERVER_VERSION });
 
   socket.on('create_lobby', ({ lobbyName, password, playerName, minPlayers }) => {
     const key = normKey(lobbyName);
@@ -310,6 +375,24 @@ io.on('connection', (socket) => {
     if (p) p.weapon = weapon === 'melee' ? 'melee' : 'ranged';
   });
 
+  socket.on('teams_decision', (wantsTeams) => {
+    const lobby = lobbies.get(socket.data.lobbyKey);
+    if (!lobby || lobby.state !== 'waiting') return;
+    if (socket.id !== lobby.hostId) return; // only the host (first player to join) answers this
+    lobby.teamsEnabled = !!wantsTeams;
+    if (!lobby.teamsEnabled) lobby.players.forEach(p => { p.team = null; });
+    io.to(lobby.key).emit('teams_decision_result', { teamsEnabled: lobby.teamsEnabled });
+    broadcastLobby(lobby);
+    console.log('[teams]', lobby.key, 'host chose', lobby.teamsEnabled ? 'TEAMS ON' : 'no teams');
+  });
+
+  socket.on('set_team', (team) => {
+    const lobby = lobbies.get(socket.data.lobbyKey);
+    if (!lobby || !lobby.teamsEnabled) return;
+    const p = lobby.players.get(socket.id);
+    if (p && (team === 'red' || team === 'blue')) { p.team = team; broadcastLobby(lobby); }
+  });
+
   socket.on('set_ready', (ready) => {
     const lobby = lobbies.get(socket.data.lobbyKey);
     if (!lobby) return;
@@ -337,7 +420,9 @@ io.on('connection', (socket) => {
     const lobby = lobbies.get(socket.data.lobbyKey);
     if (!lobby) return;
     const target = lobby.players.get(targetId);
+    const attacker = lobby.players.get(socket.id);
     if (!target || !target.alive) return;
+    if (lobby.teamsEnabled && attacker && attacker.team && attacker.team === target.team) return; // no friendly fire
     target.hp = Math.max(0, target.hp - (dmg || 15));
     if (target.hp <= 0) killPlayer(lobby, target);
   });
@@ -364,6 +449,13 @@ io.on('connection', (socket) => {
       if (lobby.tickHandle) clearInterval(lobby.tickHandle);
       lobbies.delete(lobby.key);
     } else {
+      if (lobby.hostId === socket.id) {
+        lobby.hostId = Array.from(lobby.players.keys())[0];
+        if (!lobby.teamsQuestionAsked && lobby.players.size >= 3 && lobby.state === 'waiting') {
+          lobby.teamsQuestionAsked = true;
+          io.to(lobby.hostId).emit('prompt_teams_question');
+        }
+      }
       broadcastLobby(lobby);
       checkMatchEnd(lobby);
     }
